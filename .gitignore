@@ -10,6 +10,7 @@ dist/
 # OS files
 .DS_Store
 Thumbs.db
+result
 
 # Editor directories
 .idea/

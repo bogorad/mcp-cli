@@ -24,7 +24,10 @@
           version = metadata.version;
           src = ./.;
 
-          nativeBuildInputs = [ pkgs.bun ];
+          nativeBuildInputs = [
+            pkgs.bun
+            pkgs.makeBinaryWrapper
+          ];
 
           # Fixed-output derivation to fetch dependencies
           # Using a dummy hash first to get the correct one from Nix
@@ -49,12 +52,20 @@
           buildPhase = ''
             export HOME=$TMPDIR
             ln -s ${self.packages.${system}.default.passthru.deps}/node_modules .
-            bun run build
+
+            # Bundle instead of compile for better Nix compatibility
+            bun build src/index.ts --outfile dist/index.js --target bun
           '';
 
           installPhase = ''
-            mkdir -p $out/bin
-            cp dist/mcp-cli $out/bin/
+            mkdir -p $out/libexec/mcp-cli $out/bin
+
+            # Install the bundled script
+            cp dist/index.js $out/libexec/mcp-cli/index.js
+
+            # Create a wrapper
+            makeWrapper ${pkgs.bun}/bin/bun $out/bin/mcp-cli \
+              --add-flags "run $out/libexec/mcp-cli/index.js"
           '';
         };
 
