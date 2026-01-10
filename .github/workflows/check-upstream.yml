@@ -1,0 +1,35 @@
+name: Check Upstream Release
+on:
+  schedule:
+    - cron: '0 * * * *' # Every hour
+  workflow_dispatch: # Allow manual trigger
+
+jobs:
+  check-release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Get latest upstream release
+        id: upstream
+        run: |
+          LATEST_TAG=$(curl -s https://api.github.com/repos/philschmid/mcp-cli/releases/latest | jq -r .tag_name)
+          echo "tag=$LATEST_TAG" >> $GITHUB_OUTPUT
+          
+          # Extract version using jq from metadata.json (Robust!)
+          CURRENT_VERSION=$(jq -r .version metadata.json)
+          echo "current=$CURRENT_VERSION" >> $GITHUB_OUTPUT
+
+      - name: Trigger Build if Update Found
+        if: steps.upstream.outputs.tag != steps.upstream.outputs.current && steps.upstream.outputs.tag != 'null'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          echo "New version found: ${{ steps.upstream.outputs.tag }}. Triggering build..."
+          gh workflow run update-flake.yml -f version=${{ steps.upstream.outputs.tag }}

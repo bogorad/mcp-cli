@@ -1,0 +1,149 @@
+name: Update Flake
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to update to'
+        required: true
+        type: string
+
+jobs:
+  update-version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.VERSION }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Update Version in metadata.json
+        id: version
+        run: |
+          # Remove 'v' prefix
+          VER=$(echo "${{ inputs.version }}" | sed 's/^v//')
+          
+          # Update version and reset hashes to dummy values
+          jq --arg v "$VER" '
+            .version = $v | 
+            .hashes["x86_64-linux"] = "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=" |
+            .hashes["aarch64-linux"] = "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+          ' metadata.json > metadata.json.tmp
+          mv metadata.json.tmp metadata.json
+          
+          echo "VERSION=$VER" >> $GITHUB_OUTPUT
+
+      - name: Upload updated metadata.json
+        uses: actions/upload-artifact@v4
+        with:
+          name: metadata-updated
+          path: metadata.json
+
+  build-hashes:
+    needs: update-version
+    strategy:
+      matrix:
+        include:
+          - arch: x86_64-linux
+            runner: ubuntu-latest
+          - arch: aarch64-linux
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download updated metadata.json
+        uses: actions/download-artifact@v4
+        with:
+          name: metadata-updated
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@v16
+
+      - name: Build and Extract Hash for ${{ matrix.arch }}
+        id: hash
+        run: |
+          # We expect this build to fail due to hash mismatch
+          echo "▶ Building node_modules to discover correct hash for ${{ matrix.arch }}..."
+          BUILD_LOG=$(nix build .#default.passthru.deps --system ${{ matrix.arch }} 2>&1 || true)
+          
+          # Extract the "got" hash
+          NEW_HASH=$(echo "$BUILD_LOG" | grep "got:" | sed 's/.*got: *//' | head -n1)
+          
+          if [ -z "$NEW_HASH" ]; then
+            echo "✗ Failed to extract hash from build log"
+            echo "Log output:"
+            echo "$BUILD_LOG"
+            exit 1
+          fi
+          
+          echo "✓ Found hash for ${{ matrix.arch }}: $NEW_HASH"
+          echo "$NEW_HASH" > hash.txt
+
+      - name: Upload hash for ${{ matrix.arch }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: hash-${{ matrix.arch }}
+          path: hash.txt
+
+  finalize:
+    needs: [update-version, build-hashes]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download x86_64 hash
+        uses: actions/download-artifact@v4
+        with:
+          name: hash-x86_64-linux
+          path: hash-x86_64
+
+      - name: Download aarch64 hash
+        uses: actions/download-artifact@v4
+        with:
+          name: hash-aarch64-linux
+          path: hash-aarch64
+
+      - name: Apply Hashes and Commit
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          
+          # Read the new hashes
+          X86_HASH=$(cat hash-x86_64/hash.txt)
+          ARM_HASH=$(cat hash-aarch64/hash.txt)
+          VERSION="${{ needs.update-version.outputs.version }}"
+          
+          echo "▶ Applying x86_64-linux hash: $X86_HASH"
+          echo "▶ Applying aarch64-linux hash: $ARM_HASH"
+          
+          # Update metadata.json with the final values
+          # We modify the *checked out* version of metadata.json
+          jq --arg v "$VERSION" \
+             --arg h1 "$X86_HASH" \
+             --arg h2 "$ARM_HASH" '
+            .version = $v |
+            .hashes["x86_64-linux"] = $h1 |
+            .hashes["aarch64-linux"] = $h2
+          ' metadata.json > metadata.json.tmp
+          mv metadata.json.tmp metadata.json
+          
+          # Commit logic
+          if ! git diff --quiet metadata.json; then
+            echo "✓ Changes detected. Committing..."
+            git add metadata.json
+            git commit -m "chore: update mcp-cli to $VERSION"
+            
+            # Rebase and push
+            git pull --rebase origin main
+            git push origin main
+          else
+            echo "✓ No changes detected."
+          fi
