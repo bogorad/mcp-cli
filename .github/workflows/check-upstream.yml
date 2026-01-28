@@ -19,7 +19,7 @@ jobs:
       - name: Get latest upstream release
         id: upstream
         run: |
-          LATEST_TAG=$(curl -s https://api.github.com/repos/philschmid/mcp-cli/releases/latest | jq -r .tag_name)
+          LATEST_TAG=$(curl -s https://api.github.com/repos/philschmid/mcp-cli/releases/latest | jq -r '.tag_name | ltrimstr("v")')
           echo "tag=$LATEST_TAG" >> $GITHUB_OUTPUT
           
           # Extract version using jq from metadata.json (Robust!)
